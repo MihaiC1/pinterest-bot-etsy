@@ -1,59 +1,64 @@
-import pandas as pd
-from playwright.sync_api import sync_playwright
-import time
 import os
+import pandas as pd
+import requests
+import base64
 from datetime import datetime
 
-SESSION_FILE = "pinterest_auth.json"
+# 1. Preia token-ul setat în GitHub Actions
+ACCESS_TOKEN = os.getenv("PINTEREST_ACCESS_TOKEN")
+BOARD_ID = "ID_UL_PANOULUI_TAU" # <- PUNE AICI ID-UL BOARD-ULUI TĂU
 
-def posteaza_pin(imagine_path, titlu, descriere, link):
-    with sync_playwright() as p:
-        # Lansăm browserul folosind fișierul cu sesiunea salvată
-        browser = p.chromium.launch(headless=True) 
-        context = browser.new_context(storage_state=SESSION_FILE)
-        page = context.new_page()
+if not ACCESS_TOKEN:
+    print("Eroare: Token-ul nu a fost găsit în variabilele de mediu!")
+    exit(1)
 
-        # Sari complet peste login și mergi DIRECT la pagina de creare Pin!
-        page.goto("https://www.pinterest.com/pin-creation-tool/")
-        
-        # Așteptăm să se încarce elementele esențiale din pagină
-        page.wait_for_load_state("networkidle")
-        time.sleep(4)
-        # OPREȘTE SCRIPTUL PENTRU INSPECTARE DOM
-        #page.pause()
-        try:
-            # 3. Încărcarea imaginii
-            page.set_input_files("input[type='file']", imagine_path)
-            time.sleep(2)
+if BOARD_ID == "ID_UL_PANOULUI_TAU":
+    print("Eroare: Nu ai setat BOARD_ID în script!")
+    exit(1)
 
-            # 4. Completarea datelor
-            page.get_by_role("textbox", name="Titlu").fill(titlu)
-            page.get_by_role("button", name="Descriere Descrie-ți Pinul").click()
-            # Folosim tastatura virtuală pentru a scrie textul
-            page.keyboard.type(descriere)
+def posteaza_pin_api(imagine_path, titlu, descriere, link):
+    url = "https://api.pinterest.com/v5/pins"
+    
+    headers = {
+        "Authorization": f"Bearer {ACCESS_TOKEN}",
+        "Content-Type": "application/json",
+        "Accept": "application/json"
+    }
+    
+    # Codificăm imaginea în Base64 pentru a o trimite direct prin API
+    with open(imagine_path, "rb") as image_file:
+        encoded_string = base64.b64encode(image_file.read()).decode("utf-8")
+    
+    # Setăm tipul fișierului în funcție de extensie
+    ext = imagine_path.split('.')[-1].lower()
+    content_type = f"image/{ext}" if ext in ['jpeg', 'png'] else "image/jpeg"
+    if ext == 'jpg': content_type = "image/jpeg"
 
-            page.get_by_role("textbox", name="Link").fill(link)
-            time.sleep(1)
+    payload = {
+        "board_id": BOARD_ID,
+        "title": titlu,
+        "description": descriere,
+        "link": link,
+        "media_source": {
+            "source_type": "image_base64",
+            "content_type": content_type,
+            "data": encoded_string
+        }
+    }
+    
+    response = requests.post(url, headers=headers, json=payload)
+    
+    if response.status_code == 201:
+        print(f"Postat cu succes prin API: {titlu}")
+        with open("istoric.txt", "a", encoding="utf-8") as f:
+            f.write(f"[{datetime.now().strftime('%Y-%m-%d %H:%M')}] Pin postat: {titlu}\n")
+        return True
+    else:
+        print(f"Eroare la postare: {response.status_code}")
+        print(response.json())
+        return False
 
-            page.mouse.click(10, 10)
-            time.sleep(1)
-            # 5. Publicarea (Apăsarea butonului de Save)
-            page.get_by_role("button", name="Publică").click()
-            # Așteptăm câteva secunde să se trimită datele la server
-            time.sleep(7)
-            print(f"Postat cu succes: {titlu}")
-        
-            # Scrie în jurnal
-            with open("istoric.txt", "a", encoding="utf-8") as f:
-                f.write(f"[{datetime.now().strftime('%Y-%m-%d %H:%M')}] Pin postat: {titlu}\n")
-
-        except Exception as e:
-            print(f"A apărut o problemă la completarea datelor. Eroare: {e}")
-            
-        finally:
-            browser.close()
-
-# ... (aici rămâne partea cu pandas care citește CSV-ul, la fel cum era înainte)
+# 2. Citirea CSV-ului și execuția
 try:
     df = pd.read_csv("date_postari.csv", sep="|")
     
@@ -65,16 +70,21 @@ try:
         rand_curent = nepostate.iloc[0]
         imagine_curenta = os.path.join("imagini", rand_curent['imagine'])
         
-        posteaza_pin(
+        if not os.path.exists(imagine_curenta):
+            print(f"Eroare: Imaginea {imagine_curenta} nu există în folder!")
+            exit(1)
+            
+        succes = posteaza_pin_api(
             imagine_curenta, 
             rand_curent['titlu'], 
             rand_curent['descriere'], 
             rand_curent['link']
         )
 
-        # Actualizăm CSV-ul, adăugând sep="|"
-        df.loc[df['imagine'] == rand_curent['imagine'], 'postat'] = 1
-        df.to_csv("date_postari.csv", index=False, sep="|")
-    
+        if succes:
+            # Actualizăm CSV-ul, menținând separatorul |
+            df.loc[df['imagine'] == rand_curent['imagine'], 'postat'] = 1
+            df.to_csv("date_postari.csv", index=False, sep="|")
+            
 except Exception as e:
     print(f"Eroare generală: {e}")
